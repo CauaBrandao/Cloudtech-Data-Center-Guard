@@ -1,0 +1,117 @@
+{
+  "version": 1,
+  "author": "Cauã Brandão, Fernando Siqueira e Igor Aldivan - CloudTech Data Center Guard",
+  "editor": "wokwi",
+  "parts": [
+    {
+      "type": "board-esp32-devkit-c-v4",
+      "id": "esp",
+      "top": 0,
+      "left": 0,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-dht22",
+      "id": "dht1",
+      "top": -86.1,
+      "left": -168.6,
+      "attrs": {
+        "temperature": "24",
+        "humidity": "45"
+      }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "r1",
+      "top": 205.55,
+      "left": 172.8,
+      "attrs": {
+        "value": "220"
+      }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led1",
+      "top": 140.4,
+      "left": 282.2,
+      "attrs": {
+        "color": "red",
+        "label": "EXAUSTOR"
+      }
+    }
+  ],
+  "connections": [
+    [
+      "esp:TX",
+      "$serialMonitor:RX",
+      "",
+      []
+    ],
+    [
+      "esp:RX",
+      "$serialMonitor:TX",
+      "",
+      []
+    ],
+    [
+      "dht1:VCC",
+      "esp:3V3",
+      "red",
+      [
+        "v19.2",
+        "h124.8",
+        "v-19.2"
+      ]
+    ],
+    [
+      "dht1:GND",
+      "esp:GND.1",
+      "black",
+      [
+        "v9.6",
+        "h67.2",
+        "v134.4"
+      ]
+    ],
+    [
+      "dht1:SDA",
+      "esp:15",
+      "green",
+      [
+        "v240",
+        "h307.2",
+        "v-38.4"
+      ]
+    ],
+    [
+      "esp:2",
+      "r1:1",
+      "gold",
+      [
+        "h28.8",
+        "v-9.6"
+      ]
+    ],
+    [
+      "r1:2",
+      "led1:A",
+      "gold",
+      [
+        "h19.2",
+        "v-28.8"
+      ]
+    ],
+    [
+      "led1:C",
+      "esp:GND.2",
+      "black",
+      [
+        "v9.6",
+        "h-48",
+        "v-163.2",
+        "h-153.6"
+      ]
+    ]
+  ],
+  "dependencies": {}
+}
