@@ -1,0 +1,1051 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CloudTech Solutions | Data Center Guard - Rack A01</title>
+<!--
+  ============================================================================
+  CLOUDTECH SOLUTIONS - DATA CENTER GUARD (Interface Web própria)
+  Projeto Final - Cloud Computing e Internet das Coisas (Senac TSI 2026.2)
+  Equipe: Cauã Brandão, Fernando Siqueira e Igor Aldivan
+
+  Esta página conversa com o Adafruit IO em paralelo ao Dashboard nativo:
+   - Conecta via MQTT sobre WebSocket seguro (wss://io.adafruit.com:443)
+     usando a biblioteca mqtt.min.js.
+   - Assina os feeds "temperatura" e "led" e pede o último valor salvo
+     (/get) assim que abre.
+   - Mostra a temperatura em tempo real, destaca o alerta >= 28 °C e mantém o
+     botão do exaustor sincronizado com o Wokwi e com o Adafruit IO.
+
+  SEGURANÇA: a chave real NÃO fica neste arquivo. Deixe "SUA_CHAVE_AQUI"
+  abaixo e informe usuário/chave na janela "Conectar" ao abrir a página
+  (ficam salvos só neste navegador, se você marcar a opção).
+  ============================================================================
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
+
+<!-- Biblioteca MQTT para o navegador (com CDN reserva caso a primeira falhe) -->
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<script>window.mqtt || document.write('<script src="https://cdn.jsdelivr.net/npm/mqtt/dist/mqtt.min.js"><\/script>');</script>
+
+<style>
+  /* ---------- Tokens ---------- */
+  :root {
+    --bg-1: #0E1A28;          /* corredor frio */
+    --bg-2: #13263A;
+    --panel: rgba(22, 40, 60, 0.72);
+    --panel-line: #24405C;
+    --text: #E4ECF4;
+    --muted: #8DA3B9;
+    --cold: #7CD3E6;          /* ar frio / normal */
+    --cold-deep: #3E9DB8;
+    --warm: #FFB347;          /* aquecendo */
+    --hot: #FF5A36;           /* alerta */
+    --ok: #5FD39A;
+    --ambient: rgba(124, 211, 230, 0.10);
+    --display: "Barlow Condensed", "Arial Narrow", system-ui, sans-serif;
+    --body: "Barlow", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --radius: 6px;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    min-height: 100vh;
+    font-family: var(--body);
+    font-size: 16px;
+    line-height: 1.45;
+    color: var(--text);
+    background:
+      radial-gradient(1200px 600px at 15% -10%, var(--ambient), transparent 60%),
+      linear-gradient(180deg, var(--bg-1), var(--bg-2));
+    background-color: var(--bg-2);
+    transition: background 1.2s ease;
+  }
+  /* A sala esquenta: todo o ambiente da página muda de cor (único movimento orquestrado) */
+  body.hot {
+    --bg-1: #1F1414;
+    --bg-2: #2A1712;
+    --panel: rgba(52, 26, 22, 0.72);
+    --panel-line: #5A2E24;
+    --ambient: rgba(255, 90, 54, 0.22);
+  }
+
+  button, input { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--cold); outline-offset: 3px; }
+  body.hot :focus-visible { outline-color: var(--warm); }
+
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 20px 28px 36px; }
+
+  /* ---------- Cabeçalho ---------- */
+  header.top {
+    display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+    padding-bottom: 16px; border-bottom: 1px solid var(--panel-line);
+  }
+  .brand { display: flex; align-items: center; gap: 12px; margin-right: auto; }
+  .brand svg { flex: none; }
+  .brand h1 {
+    margin: 0; font-family: var(--display); font-weight: 700;
+    font-size: 26px; letter-spacing: 0.01em; line-height: 1.05;
+  }
+  .brand p { margin: 2px 0 0; color: var(--muted); font-size: 14px; }
+
+  .conn {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 6px 12px; border: 1px solid var(--panel-line); border-radius: 999px;
+    font-size: 14px; color: var(--muted); background: var(--panel);
+  }
+  .conn i { width: 9px; height: 9px; border-radius: 50%; background: #6B7C8F; }
+  .conn.online i { background: var(--ok); box-shadow: 0 0 0 4px rgba(95,211,154,.15); }
+  .conn.online { color: var(--text); }
+  .conn.wait i { background: var(--warm); }
+  .conn.error i { background: var(--hot); }
+  .clock { font-family: var(--display); font-size: 20px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .btn-ghost {
+    border: 1px solid var(--panel-line); background: transparent; border-radius: var(--radius);
+    padding: 7px 14px; cursor: pointer; font-size: 14px;
+  }
+  .btn-ghost:hover { border-color: var(--muted); }
+
+  /* ---------- Faixa de alerta ---------- */
+  .alert {
+    display: none; align-items: center; gap: 14px;
+    margin-top: 16px; padding: 12px 18px; border-radius: var(--radius);
+    background: rgba(255, 90, 54, 0.14); border: 1px solid rgba(255, 90, 54, 0.55);
+  }
+  body.hot .alert { display: flex; }
+  .alert strong { font-family: var(--display); font-size: 22px; font-weight: 700; color: #FFD2C4; }
+  .alert span { color: #FFC9B8; }
+  .alert .pulse {
+    width: 12px; height: 12px; border-radius: 50%; background: var(--hot); flex: none;
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(255,90,54,.6); } 50% { box-shadow: 0 0 0 9px rgba(255,90,54,0); } }
+
+  /* ---------- Grade principal ---------- */
+  .grid {
+    display: grid; gap: 22px; margin-top: 22px;
+    grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+  }
+  .panel {
+    background: var(--panel); border: 1px solid var(--panel-line);
+    border-radius: var(--radius); padding: 20px 22px;
+    transition: background 1.2s ease, border-color 1.2s ease;
+  }
+  .panel h2 {
+    margin: 0 0 4px; font-family: var(--display); font-weight: 600;
+    font-size: 21px; letter-spacing: 0.01em;
+  }
+  .panel .sub { margin: 0; color: var(--muted); font-size: 14px; }
+
+  /* ---------- Temperatura (destaque) ---------- */
+  .temp { padding: 6px 4px 0; }
+  .temp-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .temp-head h2 { margin: 0; font-family: var(--display); font-weight: 600; font-size: 21px; }
+  .fresh { color: var(--muted); font-size: 14px; }
+  .fresh.stale { color: var(--warm); }
+
+  .reading {
+    display: flex; align-items: flex-start; gap: 6px; margin: 4px 0 2px;
+    font-family: var(--display); font-weight: 700; line-height: 0.9;
+    font-variant-numeric: tabular-nums;
+    color: var(--cold); transition: color 1.2s ease;
+  }
+  .reading .val { font-size: clamp(96px, 13vw, 168px); letter-spacing: -0.02em; padding-bottom: 0.14em; }
+  .reading .unit { font-size: clamp(32px, 4vw, 52px); margin-top: 0.35em; color: var(--muted); }
+  body.hot .reading { color: var(--hot); }
+  .reading.empty .val { color: var(--muted); }
+
+  .state-line { margin: 6px 0 18px; font-size: 18px; color: var(--muted); }
+  .state-line b { color: var(--text); font-weight: 600; }
+
+  /* Régua térmica */
+  .scale { position: relative; margin: 8px 0 6px; padding-top: 30px; }
+  .scale-bar {
+    position: relative; height: 18px; border-radius: 3px; overflow: hidden;
+    background: linear-gradient(90deg, #2E6F8F 0%, #7CD3E6 35%, #9BE3B4 46%, #FFB347 56%, #FF5A36 75%, #C9302C 100%);
+    opacity: 0.35;
+  }
+  .scale-fill {
+    position: absolute; left: 0; top: 30px; height: 18px; border-radius: 3px 0 0 3px;
+    background: linear-gradient(90deg, #2E6F8F 0%, #7CD3E6 35%, #9BE3B4 46%, #FFB347 56%, #FF5A36 75%, #C9302C 100%);
+    background-size: var(--scale-w, 100%) 100%;
+    width: 0; transition: width .6s ease;
+  }
+  .scale-limit {
+    position: absolute; top: 0; bottom: -6px; width: 2px; background: var(--text);
+    left: calc(28 / 60 * 100%);   /* 28 °C numa régua de 0 a 60 °C */
+  }
+  .scale-limit span {
+    position: absolute; top: 0; left: 8px; white-space: nowrap;
+    font-size: 13px; color: var(--text); font-weight: 600;
+  }
+  .scale-ticks { display: flex; justify-content: space-between; color: var(--muted); font-size: 13px; margin-top: 6px; font-variant-numeric: tabular-nums; }
+
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 18px; }
+  .stat { border-top: 1px solid var(--panel-line); padding-top: 8px; }
+  .stat dt { color: var(--muted); font-size: 13px; }
+  .stat dd { margin: 2px 0 0; font-family: var(--display); font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  /* ---------- Exaustor ---------- */
+  .fan-panel { display: flex; flex-direction: column; gap: 16px; }
+  .fan-row { display: flex; align-items: center; gap: 22px; }
+  .fan svg { display: block; width: 112px; height: 112px; }
+  .fan .blades { transform-origin: 60px 60px; }
+  .fan.on .blades { animation: spin .7s linear infinite; }
+  .fan .ring { stroke: var(--panel-line); }
+  .fan.on .ring { stroke: var(--cold); }
+  body.hot .fan.on .ring { stroke: var(--hot); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .fan-status { font-family: var(--display); font-size: 34px; font-weight: 700; line-height: 1; }
+  .fan-status.on { color: var(--cold); }
+  body.hot .fan-status.on { color: var(--hot); }
+  .fan-status.off { color: var(--muted); }
+  .fan-status.unknown { color: var(--muted); font-size: 26px; }
+  .fan-meta { color: var(--muted); font-size: 15px; margin-top: 6px; }
+
+  .switch {
+    display: flex; align-items: center; gap: 14px; width: 100%;
+    padding: 12px 14px; border: 1px solid var(--panel-line); border-radius: var(--radius);
+    background: rgba(0,0,0,.18); cursor: pointer; text-align: left;
+  }
+  .switch:hover { border-color: var(--muted); }
+  .switch:disabled { cursor: not-allowed; opacity: .55; }
+  .track {
+    position: relative; flex: none; width: 74px; height: 38px; border-radius: 999px;
+    background: #2A3A4C; transition: background .25s ease;
+  }
+  .knob {
+    position: absolute; top: 4px; left: 4px; width: 30px; height: 30px; border-radius: 50%;
+    background: #E4ECF4; transition: transform .25s ease;
+    box-shadow: 0 2px 6px rgba(0,0,0,.35);
+  }
+  .switch[aria-checked="true"] .track { background: var(--ok); }
+  .switch[aria-checked="true"] .knob { transform: translateX(36px); }
+  .switch.pending .knob { box-shadow: 0 0 0 4px rgba(255,179,71,.45); }
+  .switch.bounce .track { animation: bounce .5s ease; }
+  @keyframes bounce { 30% { transform: translateX(-6px); } 60% { transform: translateX(5px); } 100% { transform: none; } }
+  .switch-text b { display: block; font-size: 17px; font-weight: 600; }
+  .switch-text span { color: var(--muted); font-size: 14px; }
+
+  .mode {
+    padding: 12px 14px; border-radius: var(--radius); font-size: 15px;
+    border: 1px dashed var(--panel-line); color: var(--muted);
+  }
+  .mode b { color: var(--text); font-weight: 600; }
+  body.hot .mode { border-style: solid; border-color: rgba(255,90,54,.6); color: #FFC9B8; }
+  body.hot .mode b { color: #FFD2C4; }
+
+  /* ---------- Gráfico e registro ---------- */
+  .chart-box { position: relative; height: 290px; margin-top: 14px; }
+  .chart-box canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .tip {
+    position: absolute; pointer-events: none; padding: 6px 10px; border-radius: 4px;
+    background: #0A121C; border: 1px solid var(--panel-line); font-size: 13px;
+    transform: translate(-50%, -120%); white-space: nowrap; display: none;
+  }
+  .empty-note {
+    position: absolute; inset: 0; display: grid; place-items: center; text-align: center;
+    color: var(--muted); font-size: 15px; padding: 20px;
+  }
+
+  .log { list-style: none; margin: 12px 0 0; padding: 0; max-height: 310px; overflow-y: auto; }
+  .log li {
+    display: grid; grid-template-columns: 64px 10px 1fr; gap: 10px; align-items: baseline;
+    padding: 7px 0; border-bottom: 1px solid rgba(141,163,185,.12); font-size: 14px;
+  }
+  .log time { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .log .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); align-self: center; }
+  .log .t-data .dot { background: var(--cold-deep); }
+  .log .t-cmd .dot { background: var(--text); }
+  .log .t-edge .dot { background: var(--hot); }
+  .log .t-lock .dot { background: var(--warm); }
+  .log .t-ok .dot { background: var(--ok); }
+  .log .t-err .dot { background: var(--hot); }
+  .log .t-lock span, .log .t-edge span { color: #FFD2C4; font-weight: 500; }
+
+  /* ---------- Rodapé técnico ---------- */
+  .flow { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; margin-top: 12px; font-size: 15px; }
+  .node { padding: 6px 10px; border: 1px solid var(--panel-line); border-radius: 4px; background: rgba(0,0,0,.15); }
+  .node small { display: block; color: var(--muted); font-size: 12px; }
+  .arrow { color: var(--muted); }
+  .quota { margin-top: 16px; }
+  .quota-bar { height: 8px; border-radius: 4px; background: rgba(0,0,0,.25); overflow: hidden; margin-top: 6px; }
+  .quota-bar i { display: block; height: 100%; width: 0; background: var(--cold-deep); transition: width .5s ease; }
+  .quota-bar i.high { background: var(--warm); }
+  .quota p { margin: 6px 0 0; color: var(--muted); font-size: 14px; }
+
+  footer.team {
+    display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px 20px;
+    margin-top: 26px; padding-top: 14px; border-top: 1px solid var(--panel-line);
+    color: var(--muted); font-size: 14px;
+  }
+  footer.team b { color: var(--text); font-weight: 600; }
+
+  /* ---------- Toast ---------- */
+  .toast {
+    position: fixed; left: 50%; bottom: 26px; transform: translate(-50%, 20px);
+    max-width: min(560px, calc(100vw - 32px));
+    padding: 12px 18px; border-radius: var(--radius); background: #0A121C;
+    border: 1px solid var(--panel-line); box-shadow: 0 10px 30px rgba(0,0,0,.4);
+    opacity: 0; pointer-events: none; transition: opacity .25s ease, transform .25s ease; z-index: 20;
+  }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+  .toast.lock { border-color: var(--warm); }
+
+  /* ---------- Janela de conexão ---------- */
+  dialog {
+    width: min(440px, calc(100vw - 32px)); border: 1px solid var(--panel-line);
+    border-radius: 10px; background: #12202F; color: var(--text); padding: 24px;
+  }
+  dialog::backdrop { background: rgba(5, 10, 16, .7); }
+  dialog h2 { margin: 0 0 6px; font-family: var(--display); font-size: 26px; }
+  dialog p { margin: 0 0 16px; color: var(--muted); font-size: 15px; }
+  dialog label { display: block; font-size: 14px; margin: 12px 0 4px; }
+  dialog input[type=text], dialog input[type=password] {
+    width: 100%; padding: 10px 12px; border-radius: var(--radius);
+    border: 1px solid var(--panel-line); background: #0B1621;
+  }
+  .check { display: flex; align-items: center; gap: 8px; margin-top: 14px; font-size: 14px; color: var(--muted); }
+  .dlg-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+  .btn-primary {
+    border: 0; border-radius: var(--radius); padding: 10px 18px; cursor: pointer;
+    background: var(--cold); color: #0B1621; font-weight: 600;
+  }
+  .form-error { color: #FF9C85; font-size: 14px; min-height: 1.2em; margin-top: 10px; }
+
+  /* ---------- Responsivo e acessibilidade ---------- */
+  @media (max-width: 920px) {
+    .grid { grid-template-columns: 1fr; }
+    .stats { grid-template-columns: repeat(2, 1fr); }
+  }
+  @media (max-width: 520px) {
+    .wrap { padding: 16px; }
+    .fan svg { width: 84px; height: 84px; }
+    .log li { grid-template-columns: 58px 10px 1fr; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <div class="brand">
+      <!-- Marca CloudTech: rack com nuvem -->
+      <svg width="44" height="44" viewBox="0 0 44 44" aria-hidden="true">
+        <rect x="9" y="12" width="26" height="28" rx="3" fill="none" stroke="#7CD3E6" stroke-width="2"/>
+        <line x1="13" y1="20" x2="31" y2="20" stroke="#7CD3E6" stroke-width="2"/>
+        <line x1="13" y1="27" x2="31" y2="27" stroke="#7CD3E6" stroke-width="2"/>
+        <line x1="13" y1="34" x2="31" y2="34" stroke="#7CD3E6" stroke-width="2"/>
+        <circle cx="29" cy="20" r="1.6" fill="#5FD39A"/><circle cx="29" cy="27" r="1.6" fill="#5FD39A"/>
+        <path d="M14 10c0-3 2.4-5.5 5.5-5.5 2.2 0 4 1.2 5 3 .6-.3 1.3-.5 2-.5 2.5 0 4.5 2 4.5 4.5" fill="none" stroke="#E4ECF4" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+      <div>
+        <h1>CloudTech Solutions</h1>
+        <p>Data Center Guard, rack A01 da unidade remota</p>
+      </div>
+    </div>
+    <span class="clock" id="clock">--:--:--</span>
+    <span class="conn" id="conn" role="status"><i></i><span id="connText">Desconectado</span></span>
+    <button class="btn-ghost" id="btnConfig" type="button">Conectar</button>
+  </header>
+
+  <div class="alert" role="alert" id="alert">
+    <span class="pulse" aria-hidden="true"></span>
+    <strong id="alertTitle">Alerta térmico</strong>
+    <span id="alertText">A sala passou de 28 °C. O ESP32 ligou o exaustor sozinho e bloqueou o desligamento.</span>
+  </div>
+
+  <main class="grid">
+    <!-- Temperatura -->
+    <section class="temp" aria-labelledby="tTitle">
+      <div class="temp-head">
+        <h2 id="tTitle">Temperatura do rack</h2>
+        <span class="fresh" id="fresh">aguardando a primeira leitura</span>
+      </div>
+      <div class="reading empty" id="reading" aria-live="polite">
+        <span class="val" id="tempVal">--.-</span><span class="unit">°C</span>
+      </div>
+      <p class="state-line" id="stateLine">Abra a simulação no Wokwi para começar a receber dados a cada 4 segundos.</p>
+
+      <div class="scale" aria-hidden="true">
+        <div class="scale-limit" id="scaleLimit"><span>Limite Edge 28 °C</span></div>
+        <div class="scale-bar"></div>
+        <div class="scale-fill" id="scaleFill"></div>
+      </div>
+      <div class="scale-ticks" aria-hidden="true"><span>0</span><span>10</span><span>20</span><span>30</span><span>40</span><span>50</span><span>60 °C</span></div>
+
+      <dl class="stats">
+        <div class="stat"><dt>Mínima da sessão</dt><dd id="sMin">--</dd></div>
+        <div class="stat"><dt>Máxima da sessão</dt><dd id="sMax">--</dd></div>
+        <div class="stat"><dt>Média da sessão</dt><dd id="sAvg">--</dd></div>
+        <div class="stat"><dt>Leituras recebidas</dt><dd id="sCount">0</dd></div>
+      </dl>
+    </section>
+
+    <!-- Exaustor -->
+    <section class="panel fan-panel" aria-labelledby="fTitle">
+      <div>
+        <h2 id="fTitle">Exaustor do rack</h2>
+        <p class="sub">LED vermelho no GPIO 2 do ESP32, feed <b>led</b></p>
+      </div>
+      <div class="fan-row">
+        <div class="fan" id="fan" aria-hidden="true">
+          <svg viewBox="0 0 120 120">
+            <circle class="ring" cx="60" cy="60" r="54" fill="none" stroke-width="4"/>
+            <g class="blades" fill="#8DA3B9">
+              <path d="M60 60 C52 40 54 18 66 12 C74 22 70 44 60 60Z"/>
+              <path d="M60 60 C52 40 54 18 66 12 C74 22 70 44 60 60Z" transform="rotate(90 60 60)"/>
+              <path d="M60 60 C52 40 54 18 66 12 C74 22 70 44 60 60Z" transform="rotate(180 60 60)"/>
+              <path d="M60 60 C52 40 54 18 66 12 C74 22 70 44 60 60Z" transform="rotate(270 60 60)"/>
+            </g>
+            <circle cx="60" cy="60" r="8" fill="#E4ECF4"/>
+          </svg>
+        </div>
+        <div>
+          <div class="fan-status unknown" id="fanStatus">Aguardando estado</div>
+          <div class="fan-meta" id="fanMeta">O botão sincroniza com o Adafruit IO e com o Wokwi.</div>
+        </div>
+      </div>
+
+      <button class="switch" id="switch" type="button" role="switch" aria-checked="false" disabled>
+        <span class="track"><span class="knob"></span></span>
+        <span class="switch-text">
+          <b id="switchLabel">Ligar exaustor</b>
+          <span id="switchHint">Conecte ao Adafruit IO para usar</span>
+        </span>
+      </button>
+
+      <div class="mode" id="mode"><b>Controle manual liberado.</b> Abaixo de 28 °C qualquer tela pode ligar ou desligar o exaustor.</div>
+    </section>
+
+    <!-- Gráfico -->
+    <section class="panel" aria-labelledby="cTitle">
+      <h2 id="cTitle">Histórico de temperatura</h2>
+      <p class="sub">Últimas leituras publicadas pelo ESP32, uma a cada 4 segundos</p>
+      <div class="chart-box" id="chartBox">
+        <canvas id="chart" role="img" aria-label="Gráfico da temperatura do rack ao longo do tempo"></canvas>
+        <div class="tip" id="tip"></div>
+        <div class="empty-note" id="chartEmpty">O gráfico aparece assim que chegarem as primeiras leituras.</div>
+      </div>
+    </section>
+
+    <!-- Registro de eventos -->
+    <section class="panel" aria-labelledby="lTitle">
+      <h2 id="lTitle">Registro de eventos</h2>
+      <p class="sub">Comandos, disparos do Edge e recusas da trava térmica</p>
+      <ul class="log" id="log" aria-live="polite"></ul>
+    </section>
+
+    <!-- Arquitetura + cota -->
+    <section class="panel" style="grid-column: 1 / -1" aria-labelledby="aTitle">
+      <h2 id="aTitle">Como os dados circulam</h2>
+      <div class="flow">
+        <span class="node">ESP32 no Wokwi<small>DHT22 GPIO 15, LED GPIO 2</small></span>
+        <span class="arrow">MQTT :1883</span>
+        <span class="node">Adafruit IO<small>feeds temperatura e led</small></span>
+        <span class="arrow">WebSocket wss :443</span>
+        <span class="node">Este painel<small>index.html do grupo</small></span>
+        <span class="arrow">e em paralelo</span>
+        <span class="node">Dashboard Adafruit IO<small>Gauge, Line Chart e Toggle</small></span>
+      </div>
+      <div class="quota">
+        <div><b id="quotaNum">0</b> de 30 pontos de dados no último minuto (estimativa pelo que este painel recebeu)</div>
+        <div class="quota-bar"><i id="quotaBar"></i></div>
+        <p>Telemetria a cada 4 s gera 15 pontos por minuto, metade da cota gratuita. Os outros 15 ficam livres para os botões.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="team">
+    <span>Equipe: <b>Cauã Brandão</b>, <b>Fernando Siqueira</b> e <b>Igor Aldivan</b></span>
+    <span>Senac, Tecnologia em Sistemas para Internet, Cloud Computing e Internet das Coisas 2026.2</span>
+  </footer>
+</div>
+
+<div class="toast" id="toast" role="status"></div>
+
+<dialog id="dlg">
+  <form method="dialog" id="cfgForm">
+    <h2>Conectar ao Adafruit IO</h2>
+    <p>Use a conta única do grupo. A chave fica apenas neste navegador e nunca vai para o arquivo enviado ao AVA.</p>
+    <label for="inUser">Usuário do Adafruit IO</label>
+    <input id="inUser" type="text" autocomplete="username" spellcheck="false" required>
+    <label for="inKey">Chave (AIO Key)</label>
+    <input id="inKey" type="password" autocomplete="current-password" spellcheck="false" required>
+    <label class="check"><input id="inRemember" type="checkbox" checked> Lembrar neste navegador</label>
+    <div class="form-error" id="formError"></div>
+    <div class="dlg-actions">
+      <button class="btn-ghost" type="button" id="btnForget">Esquecer dados</button>
+      <button class="btn-primary" type="submit" value="ok">Conectar</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+/* ===========================================================================
+   1) CONFIGURAÇÃO
+   Deixe os marcadores abaixo como estão no arquivo entregue no AVA.
+   Na apresentação, informe usuário e chave pela janela "Conectar".
+   (Se preferir, troque aqui localmente; não salve a chave real em lugar público.)
+   =========================================================================== */
+const ADAFRUIT_USERNAME = 'SEU_USUARIO_AQUI';
+const ADAFRUIT_KEY      = 'SUA_CHAVE_AQUI';
+
+const BROKER_URL   = 'wss://io.adafruit.com:443';
+const LIMITE       = 28.0;      // °C - mesmo limite usado no ESP32
+const ESCALA_MAX   = 60;        // régua térmica de 0 a 60 °C
+const MAX_PONTOS   = 60;        // 60 leituras x 4 s = 4 minutos no gráfico
+const SEM_DADOS_MS = 12000;     // 3 ciclos sem telemetria = aviso
+
+/* ===========================================================================
+   2) ESTADO DA PÁGINA
+   =========================================================================== */
+let client = null;
+let cfg = { username: '', key: '' };
+let temperatura = null;           // última temperatura recebida
+let ultimaLeituraEm = 0;
+let ledEstado = null;             // '1' | '0' | null (desconhecido)
+let ultimoComando = null;         // { valor, em } enviado por ESTA página
+let estavaQuente = false;
+let saiuDoCalorEm = 0;
+let mudancaExterna = null;        // { valor, em } mudança no led feita fora desta página
+let loginRecusado = false;
+let ultimoLedRecebido = null;     // { valor, em } último valor que chegou no feed led
+const historico = [];             // { t: Date, v: Number }
+const stats = { min: Infinity, max: -Infinity, soma: 0, n: 0 };
+const pontosRecebidos = [];       // instantes de pontos de dados (para a cota)
+const aguardandoGet = { temperatura: false, led: false };
+
+const $ = (id) => document.getElementById(id);
+const fmt = (v) => v.toFixed(1).replace('.', ',');
+const hora = (d) => d.toLocaleTimeString('pt-BR', { hour12: false });
+
+/* ===========================================================================
+   3) CREDENCIAIS (marcadores no código -> janela -> localStorage)
+   =========================================================================== */
+function carregarCredenciais() {
+  if (ADAFRUIT_USERNAME !== 'SEU_USUARIO_AQUI' && ADAFRUIT_KEY !== 'SUA_CHAVE_AQUI') {
+    return { username: ADAFRUIT_USERNAME, key: ADAFRUIT_KEY };
+  }
+  try {
+    const salvo = JSON.parse(localStorage.getItem('cloudtech-aio') || 'null');
+    if (salvo && salvo.username && salvo.key) return salvo;
+  } catch (e) { /* armazenamento indisponível: segue sem lembrar */ }
+  return null;
+}
+function salvarCredenciais(c) {
+  try { localStorage.setItem('cloudtech-aio', JSON.stringify(c)); } catch (e) {}
+}
+function esquecerCredenciais() {
+  try { localStorage.removeItem('cloudtech-aio'); } catch (e) {}
+}
+
+function abrirJanela(msgErro) {
+  $('inUser').value = cfg.username || '';
+  $('inKey').value = cfg.key || '';
+  $('formError').textContent = msgErro || '';
+  if (!$('dlg').open) $('dlg').showModal();
+  ($('inUser').value ? $('inKey') : $('inUser')).focus();
+}
+
+$('cfgForm').addEventListener('submit', (ev) => {
+  const username = $('inUser').value.trim();
+  const key = $('inKey').value.trim();
+  if (!username || !key) { ev.preventDefault(); $('formError').textContent = 'Preencha usuário e chave.'; return; }
+  cfg = { username, key };
+  if ($('inRemember').checked) salvarCredenciais(cfg); else esquecerCredenciais();
+  conectar();
+});
+$('btnForget').addEventListener('click', () => {
+  esquecerCredenciais();
+  $('inUser').value = ''; $('inKey').value = '';
+  $('formError').textContent = 'Dados apagados deste navegador.';
+});
+$('btnConfig').addEventListener('click', () => abrirJanela());
+
+/* ===========================================================================
+   4) CONEXÃO MQTT VIA WEBSOCKET SEGURO
+   =========================================================================== */
+const topico = (feed) => `${cfg.username}/feeds/${feed}`;
+
+function setConexao(estado, texto) {
+  const el = $('conn');
+  el.className = 'conn ' + estado;
+  $('connText').textContent = texto;
+  $('btnConfig').textContent = estado === 'online' ? 'Trocar conta' : 'Conectar';
+  atualizarBotao();
+}
+
+function conectar() {
+  if (typeof mqtt === 'undefined') {
+    setConexao('error', 'Biblioteca MQTT não carregou');
+    registrar('err', 'Não foi possível baixar o mqtt.min.js. Verifique a internet e recarregue a página.');
+    return;
+  }
+  if (client) { client.removeAllListeners(); client.end(true); client = null; }
+  loginRecusado = false;
+
+  setConexao('wait', 'Conectando...');
+  registrar('cmd', `Conectando ao broker ${BROKER_URL} como ${cfg.username}`);
+
+  client = mqtt.connect(BROKER_URL, {
+    username: cfg.username,
+    password: cfg.key,
+    clientId: 'cloudtech-web-' + Math.random().toString(16).slice(2, 10),
+    reconnectPeriod: 5000,
+    connectTimeout: 10000,
+    clean: true
+  });
+
+  client.on('connect', () => {
+    setConexao('online', 'Online no Adafruit IO');
+    registrar('ok', 'Conectado ao Adafruit IO via WebSocket seguro (porta 443)');
+    client.subscribe([topico('temperatura'), topico('led'),
+                      `${cfg.username}/throttle`, `${cfg.username}/errors`], (err) => {
+      if (err) { registrar('err', 'Falha ao assinar os feeds: ' + err.message); return; }
+      // Pede o último valor salvo de cada feed assim que a página abre
+      aguardandoGet.temperatura = true;
+      aguardandoGet.led = true;
+      client.publish(topico('temperatura') + '/get', '');
+      client.publish(topico('led') + '/get', '');
+    });
+    carregarHistorico();
+  });
+
+  client.on('reconnect', () => setConexao('wait', 'Reconectando...'));
+  client.on('offline', () => setConexao('error', 'Sem conexão'));
+  client.on('close', () => { if (!loginRecusado) setConexao('wait', 'Reconectando...'); });
+  client.on('error', (err) => {
+    const msg = String(err && err.message || err);
+    if (/auth|not authorized|bad user/i.test(msg)) {
+      loginRecusado = true;
+      setConexao('error', 'Usuário ou chave inválidos');
+      registrar('err', 'O Adafruit IO recusou o login. Confira usuário e chave.');
+      client.end(true);
+      abrirJanela('O Adafruit IO recusou o login. Confira o usuário e a chave (AIO Key).');
+    } else {
+      setConexao('error', 'Erro de conexão');
+      registrar('err', 'Erro de conexão: ' + msg);
+    }
+  });
+
+  client.on('message', (topic, payload) => {
+    const valor = payload.toString().trim();
+    if (topic === topico('temperatura')) return receberTemperatura(valor);
+    if (topic === topico('led')) return receberLed(valor);
+    if (topic.endsWith('/throttle')) {
+      registrar('lock', 'Aviso de limite do Adafruit IO: ' + valor);
+      mostrarToast('O Adafruit IO avisou que a cota por minuto está no limite. Espere alguns segundos entre os cliques.', true);
+      return;
+    }
+    if (topic.endsWith('/errors')) registrar('err', 'Adafruit IO: ' + valor);
+  });
+}
+
+// Carrega o histórico recente pela API REST (se o navegador permitir)
+async function carregarHistorico() {
+  try {
+    const url = `https://io.adafruit.com/api/v2/${encodeURIComponent(cfg.username)}/feeds/temperatura/data?limit=${MAX_PONTOS}`;
+    const resp = await fetch(url, { headers: { 'X-AIO-Key': cfg.key } });
+    if (!resp.ok) return;
+    const dados = await resp.json();
+    const antigos = dados
+      .map(d => ({ t: new Date(d.created_at), v: parseFloat(d.value) }))
+      .filter(p => !isNaN(p.v))
+      .reverse();
+    if (!antigos.length) return;
+    const primeiroAtual = historico.length ? historico[0].t : new Date(8.64e15);
+    const anteriores = antigos.filter(p => p.t < primeiroAtual);
+    historico.unshift(...anteriores);
+    while (historico.length > MAX_PONTOS) historico.shift();
+    desenharGrafico();
+    registrar('data', `Histórico carregado: ${anteriores.length} leituras anteriores do feed temperatura`);
+  } catch (e) { /* sem histórico: o gráfico começa com os dados ao vivo */ }
+}
+
+/* ===========================================================================
+   5) TEMPERATURA
+   =========================================================================== */
+function receberTemperatura(texto) {
+  const v = parseFloat(texto.replace(',', '.'));
+  if (isNaN(v)) return;
+  const agora = new Date();
+  const veioDoGet = aguardandoGet.temperatura;
+  aguardandoGet.temperatura = false;
+  if (!veioDoGet) contarPonto();
+
+  temperatura = v;
+  ultimaLeituraEm = agora.getTime();
+
+  stats.min = Math.min(stats.min, v);
+  stats.max = Math.max(stats.max, v);
+  stats.soma += v; stats.n++;
+
+  // evita duplicar o ponto que já veio no histórico REST
+  const ult = historico[historico.length - 1];
+  if (!ult || Math.abs(ult.t - agora) > 1500 || ult.v !== v) historico.push({ t: agora, v });
+  while (historico.length > MAX_PONTOS) historico.shift();
+
+  if (veioDoGet) registrar('data', `Última temperatura salva na nuvem: ${fmt(v)} °C`);
+
+  atualizarTemperatura();
+  desenharGrafico();
+}
+
+function atualizarTemperatura() {
+  if (temperatura === null) return;
+  const quente = temperatura >= LIMITE;
+
+  $('tempVal').textContent = fmt(temperatura);
+  $('reading').classList.remove('empty');
+  document.body.classList.toggle('hot', quente);
+
+  const pct = Math.max(0, Math.min(100, (temperatura / ESCALA_MAX) * 100));
+  const fill = $('scaleFill');
+  fill.style.width = pct + '%';
+  fill.style.setProperty('--scale-w', (100 / Math.max(pct, 0.01)) * 100 + '%');
+
+  const margem = (LIMITE - temperatura);
+  $('stateLine').innerHTML = quente
+    ? `<b>Acima do limite.</b> ${fmt(temperatura - LIMITE)} °C acima de 28 °C, exaustor em modo automático.`
+    : `<b>Faixa segura.</b> ${fmt(margem)} °C abaixo do limite de 28 °C.`;
+
+  const externaRecente = mudancaExterna && (Date.now() - mudancaExterna.em) < 15000;
+  if (quente && !estavaQuente) {
+    registrar('edge', `Temperatura chegou a ${fmt(temperatura)} °C, acima do limite de 28 °C`);
+    if (externaRecente && mudancaExterna.valor === '1') {
+      registrar('edge', 'Disparo Edge confirmado: o ESP32 ligou o exaustor sozinho ao detectar o calor');
+    }
+    mudancaExterna = null;
+  }
+  if (!quente && estavaQuente) {
+    saiuDoCalorEm = Date.now();
+    registrar('ok', `Temperatura voltou para ${fmt(temperatura)} °C, abaixo de 28 °C`);
+    if (externaRecente && mudancaExterna.valor === '0') {
+      registrar('ok', 'Retorno automático confirmado: o ESP32 desligou o exaustor ao esfriar');
+    }
+    mudancaExterna = null;
+  }
+  estavaQuente = quente;
+
+  $('sMin').textContent = fmt(stats.min) + ' °C';
+  $('sMax').textContent = fmt(stats.max) + ' °C';
+  $('sAvg').textContent = stats.n ? fmt(stats.soma / stats.n) + ' °C' : '--';
+  $('sCount').textContent = stats.n;
+
+  atualizarModo();
+  atualizarBotao();
+}
+
+/* ===========================================================================
+   6) EXAUSTOR (feed led)
+   =========================================================================== */
+function normalizar(v) {
+  const s = String(v).trim().toUpperCase();
+  if (s === '1' || s === 'ON') return '1';
+  if (s === '0' || s === 'OFF') return '0';
+  return null;
+}
+
+function receberLed(texto) {
+  const valor = normalizar(texto);
+  if (!valor) { registrar('err', `Valor desconhecido no feed led: "${texto}"`); return; }
+
+  const anterior = ledEstado;
+  const agora = Date.now();
+  const veioDoGet = aguardandoGet.led;
+  aguardandoGet.led = false;
+  if (!veioDoGet) contarPonto();
+
+  const quente = temperatura !== null && temperatura >= LIMITE;
+  const recente = ultimoComando && (agora - ultimoComando.em) < 6000;
+  // '0' recebido há pouco, vindo de qualquer tela, com a sala quente
+  const zeroRecente = ultimoLedRecebido && ultimoLedRecebido.valor === '0' && (agora - ultimoLedRecebido.em) < 4000;
+  ultimoLedRecebido = { valor, em: agora };
+
+  if (veioDoGet) {
+    registrar('data', `Estado salvo do exaustor: ${valor === '1' ? 'LIGADO (1)' : 'DESLIGADO (0)'}`);
+  } else if (recente && ultimoComando.valor === valor && !ultimoComando.confirmado) {
+    ultimoComando.confirmado = true;
+    registrar('cmd', `Nuvem confirmou o comando desta página: ${valor}`);
+  } else if (valor === '1' && recente && ultimoComando.valor === '0' && quente) {
+    // TRAVA TÉRMICA: pedimos 0, o ESP32 respondeu 1
+    registrar('lock', 'Trava térmica: o ESP32 recusou o desligamento e devolveu 1');
+    mostrarToast('Desligamento recusado pelo ESP32. A sala está acima de 28 °C, então o exaustor continua ligado.', true);
+    $('switch').classList.add('bounce');
+    setTimeout(() => $('switch').classList.remove('bounce'), 600);
+    ultimoComando = null;
+  } else if (valor === '1' && quente && zeroRecente) {
+    // TRAVA TÉRMICA acionada por um clique no Dashboard do Adafruit IO
+    registrar('lock', 'Trava térmica: o ESP32 recusou o desligamento pedido no Dashboard Adafruit IO');
+    mostrarToast('O Dashboard do Adafruit IO pediu para desligar e o ESP32 recusou: a sala está acima de 28 °C.', true);
+    $('switch').classList.add('bounce');
+    setTimeout(() => $('switch').classList.remove('bounce'), 600);
+  } else if (valor === '0' && quente && anterior !== '0') {
+    // Pode ser um clique no Dashboard (o ESP32 vai responder 1 em ~1 s) ou o
+    // ESP32 que já esfriou (a telemetria nova ainda não chegou). Esperamos para saber.
+    const em = agora;
+    setTimeout(() => {
+      if (ultimoLedRecebido && ultimoLedRecebido.em === em) {
+        mudancaExterna = { valor: '0', em };
+        registrar('cmd', 'Exaustor desligado fora desta página (ESP32 ou Dashboard Adafruit IO)');
+      }
+    }, 2500);
+  } else if (anterior !== valor) {
+    if (valor === '1' && quente) {
+      registrar('edge', 'Disparo Edge: o ESP32 ligou o exaustor sozinho e publicou 1');
+    } else if (valor === '0' && !quente && saiuDoCalorEm && (agora - saiuDoCalorEm) < 10000) {
+      registrar('ok', 'Retorno automático: a sala esfriou e o ESP32 desligou o exaustor');
+    } else {
+      // O ESP32 publica o LED na hora, antes da próxima telemetria (4 s).
+      // Guardamos a mudança e confirmamos a origem quando a temperatura chegar.
+      mudancaExterna = { valor, em: agora };
+      registrar('cmd', `Exaustor ${valor === '1' ? 'ligado' : 'desligado'} fora desta página (Dashboard Adafruit IO ou ESP32)`);
+    }
+  } else if (valor === '1' && quente) {
+    registrar('lock', 'ESP32 reafirmou exaustor LIGADO (trava térmica ativa)');
+  }
+
+  ledEstado = valor;
+  atualizarExaustor();
+}
+
+function atualizarExaustor() {
+  const ligado = ledEstado === '1';
+  const st = $('fanStatus');
+  if (ledEstado === null) {
+    st.className = 'fan-status unknown'; st.textContent = 'Aguardando estado';
+  } else {
+    st.className = 'fan-status ' + (ligado ? 'on' : 'off');
+    st.textContent = ligado ? 'Ligado (1)' : 'Desligado (0)';
+  }
+  $('fan').classList.toggle('on', ligado);
+  $('switch').setAttribute('aria-checked', String(ligado));
+  $('switch').classList.remove('pending');
+  atualizarModo();
+  atualizarBotao();
+}
+
+function atualizarModo() {
+  const quente = temperatura !== null && temperatura >= LIMITE;
+  $('mode').innerHTML = quente
+    ? '<b>Trava térmica ativa.</b> O ESP32 controla o exaustor e recusa pedidos de desligar enquanto a sala estiver em 28 °C ou mais.'
+    : '<b>Controle manual liberado.</b> Abaixo de 28 °C qualquer tela pode ligar ou desligar o exaustor.';
+  $('fanMeta').textContent = quente
+    ? 'Modo automático: decisão tomada no próprio ESP32 (Edge).'
+    : 'O botão sincroniza com o Adafruit IO e com o Wokwi.';
+}
+
+function atualizarBotao() {
+  const sw = $('switch');
+  const online = client && client.connected;
+  const ligado = ledEstado === '1';
+  const quente = temperatura !== null && temperatura >= LIMITE;
+  sw.disabled = !online;
+  $('switchLabel').textContent = ligado ? 'Desligar exaustor' : 'Ligar exaustor';
+  $('switchHint').textContent = !online
+    ? 'Conecte ao Adafruit IO para usar'
+    : (quente && ligado ? 'Tente desligar: a trava térmica do ESP32 vai recusar' : 'Envia o comando para o feed led');
+}
+
+// Clique no botão: publica '1' ou '0' no feed led (igual ao Toggle do Adafruit IO)
+$('switch').addEventListener('click', () => {
+  if (!client || !client.connected) { mostrarToast('Sem conexão com o Adafruit IO.'); return; }
+  const cmd = ledEstado === '1' ? '0' : '1';
+  enviarComando(cmd);
+});
+
+function enviarComando(cmd) {
+  client.publish(topico('led'), cmd);
+  ultimoComando = { valor: cmd, em: Date.now(), confirmado: false };
+  registrar('cmd', `Esta página enviou ${cmd} para o feed led (${cmd === '1' ? 'ligar' : 'desligar'})`);
+  // mostra a intenção na hora; o estado real chega pelo broker em seguida
+  const sw = $('switch');
+  sw.setAttribute('aria-checked', String(cmd === '1'));
+  sw.classList.add('pending');
+}
+
+/* ===========================================================================
+   7) GRÁFICO (canvas próprio, sem bibliotecas extras)
+   =========================================================================== */
+const canvas = $('chart');
+const ctx = canvas.getContext('2d');
+let pontosTela = [];
+
+function desenharGrafico() {
+  const box = $('chartBox');
+  const dpr = window.devicePixelRatio || 1;
+  const W = box.clientWidth, H = box.clientHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  $('chartEmpty').style.display = historico.length ? 'none' : 'grid';
+  if (!historico.length) return;
+
+  const css = getComputedStyle(document.body);
+  const corFria = css.getPropertyValue('--cold').trim();
+  const corQuente = css.getPropertyValue('--hot').trim();
+  const corMuted = css.getPropertyValue('--muted').trim();
+  const corLinha = css.getPropertyValue('--panel-line').trim();
+  const corTexto = css.getPropertyValue('--text').trim();
+
+  const pad = { l: 44, r: 16, t: 14, b: 30 };
+  const vals = historico.map(p => p.v);
+  let yMin = Math.floor(Math.min(...vals, LIMITE - 6) - 1);
+  let yMax = Math.ceil(Math.max(...vals, LIMITE + 4) + 1);
+  const passo = (yMax - yMin) > 30 ? 10 : 5;
+  yMin = Math.floor(yMin / passo) * passo;
+  yMax = Math.ceil(yMax / passo) * passo;
+
+  const n = historico.length;
+  const x = (i) => pad.l + (n === 1 ? (W - pad.l - pad.r) / 2 : i * (W - pad.l - pad.r) / (n - 1));
+  const y = (v) => pad.t + (1 - (v - yMin) / (yMax - yMin)) * (H - pad.t - pad.b);
+
+  // grade horizontal
+  ctx.font = '13px Barlow, system-ui, sans-serif';
+  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  for (let v = yMin; v <= yMax; v += passo) {
+    ctx.strokeStyle = corLinha; ctx.globalAlpha = 0.6; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(pad.l, y(v)); ctx.lineTo(W - pad.r, y(v)); ctx.stroke();
+    ctx.globalAlpha = 1; ctx.fillStyle = corMuted;
+    ctx.fillText(v + '°', pad.l - 8, y(v));
+  }
+
+  // faixa acima do limite
+  ctx.fillStyle = corQuente; ctx.globalAlpha = 0.08;
+  ctx.fillRect(pad.l, pad.t, W - pad.l - pad.r, y(LIMITE) - pad.t);
+  ctx.globalAlpha = 1;
+
+  // linha do limite 28 °C
+  ctx.setLineDash([6, 5]); ctx.strokeStyle = corQuente; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(pad.l, y(LIMITE)); ctx.lineTo(W - pad.r, y(LIMITE)); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = corQuente; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
+  ctx.fillText('limite 28 °C', pad.l + 6, y(LIMITE) - 4);
+
+  // área sob a curva
+  const grad = ctx.createLinearGradient(0, pad.t, 0, H - pad.b);
+  grad.addColorStop(0, 'rgba(124,211,230,0.28)'); grad.addColorStop(1, 'rgba(124,211,230,0)');
+  ctx.beginPath(); ctx.moveTo(x(0), y(historico[0].v));
+  historico.forEach((p, i) => ctx.lineTo(x(i), y(p.v)));
+  ctx.lineTo(x(n - 1), H - pad.b); ctx.lineTo(x(0), H - pad.b); ctx.closePath();
+  ctx.fillStyle = grad; ctx.fill();
+
+  // linha: cada segmento colorido pela temperatura
+  ctx.lineWidth = 2.5; ctx.lineJoin = 'round';
+  for (let i = 1; i < n; i++) {
+    const quente = historico[i].v >= LIMITE || historico[i - 1].v >= LIMITE;
+    ctx.strokeStyle = quente ? corQuente : corFria;
+    ctx.beginPath(); ctx.moveTo(x(i - 1), y(historico[i - 1].v)); ctx.lineTo(x(i), y(historico[i].v)); ctx.stroke();
+  }
+  // pontos
+  pontosTela = historico.map((p, i) => ({ x: x(i), y: y(p.v), p }));
+  pontosTela.forEach(({ x: px, y: py, p }, i) => {
+    const ultimo = i === n - 1;
+    ctx.fillStyle = p.v >= LIMITE ? corQuente : corFria;
+    ctx.beginPath(); ctx.arc(px, py, ultimo ? 5 : 2.5, 0, Math.PI * 2); ctx.fill();
+    if (ultimo) { ctx.strokeStyle = corTexto; ctx.lineWidth = 2; ctx.stroke(); }
+  });
+
+  // rótulos de horário
+  ctx.fillStyle = corMuted; ctx.textBaseline = 'top';
+  const qtdRotulos = Math.max(2, Math.min(6, Math.floor((W - pad.l - pad.r) / 110)));
+  for (let k = 0; k < qtdRotulos; k++) {
+    const i = Math.round(k * (n - 1) / (qtdRotulos - 1));
+    if (i < 0 || i >= n) continue;
+    ctx.textAlign = k === 0 ? 'left' : (k === qtdRotulos - 1 ? 'right' : 'center');
+    ctx.fillText(hora(historico[i].t), x(i), H - pad.b + 8);
+    if (n === 1) break;
+  }
+}
+
+canvas.addEventListener('mousemove', (ev) => {
+  if (!pontosTela.length) return;
+  const r = canvas.getBoundingClientRect();
+  const mx = ev.clientX - r.left;
+  let melhor = pontosTela[0];
+  for (const p of pontosTela) if (Math.abs(p.x - mx) < Math.abs(melhor.x - mx)) melhor = p;
+  const tip = $('tip');
+  tip.style.display = 'block';
+  tip.style.left = melhor.x + 'px';
+  tip.style.top = melhor.y + 'px';
+  tip.textContent = `${fmt(melhor.p.v)} °C às ${hora(melhor.p.t)}`;
+});
+canvas.addEventListener('mouseleave', () => { $('tip').style.display = 'none'; });
+new ResizeObserver(() => desenharGrafico()).observe($('chartBox'));
+
+/* ===========================================================================
+   8) REGISTRO, COTA, TOAST E RELÓGIO
+   =========================================================================== */
+function registrar(tipo, texto) {
+  const li = document.createElement('li');
+  li.className = 't-' + tipo;
+  li.innerHTML = `<time>${hora(new Date())}</time><i class="dot"></i><span></span>`;
+  li.querySelector('span').textContent = texto;
+  const log = $('log');
+  log.prepend(li);
+  while (log.children.length > 50) log.lastChild.remove();
+}
+
+function contarPonto() { pontosRecebidos.push(Date.now()); }
+function atualizarCota() {
+  const limite = Date.now() - 60000;
+  while (pontosRecebidos.length && pontosRecebidos[0] < limite) pontosRecebidos.shift();
+  const q = pontosRecebidos.length;
+  $('quotaNum').textContent = q;
+  const bar = $('quotaBar');
+  bar.style.width = Math.min(100, q / 30 * 100) + '%';
+  bar.classList.toggle('high', q >= 25);
+}
+
+let toastTimer = null;
+function mostrarToast(texto, trava) {
+  const t = $('toast');
+  t.textContent = texto;
+  t.classList.toggle('lock', !!trava);
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 4500);
+}
+
+function tique() {
+  $('clock').textContent = hora(new Date());
+  atualizarCota();
+  if (ultimaLeituraEm) {
+    const s = Math.round((Date.now() - ultimaLeituraEm) / 1000);
+    const f = $('fresh');
+    const parado = Date.now() - ultimaLeituraEm > SEM_DADOS_MS;
+    f.textContent = parado
+      ? `sem telemetria há ${s} s. A simulação do Wokwi está rodando?`
+      : (s <= 1 ? 'atualizado agora' : `atualizado há ${s} s`);
+    f.classList.toggle('stale', parado);
+  }
+  // se o comando não foi confirmado em 6 s, volta o botão ao estado conhecido
+  if (ultimoComando && !ultimoComando.confirmado && Date.now() - ultimoComando.em > 6000) {
+    registrar('err', 'O comando não voltou da nuvem em 6 s. Confira a conexão.');
+    ultimoComando = null;
+    atualizarExaustor();
+  }
+}
+setInterval(tique, 1000);
+tique();
+
+/* ===========================================================================
+   9) INÍCIO
+   =========================================================================== */
+registrar('data', 'Painel CloudTech iniciado');
+const credenciais = carregarCredenciais();
+if (credenciais) { cfg = credenciais; conectar(); }
+else { abrirJanela(); }
+</script>
+</body>
+</html>
