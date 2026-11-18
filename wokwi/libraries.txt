@@ -1,0 +1,4 @@
+# Wokwi Library List
+# Bibliotecas usadas pelo sketch.ino (instaladas automaticamente pelo Wokwi)
+Adafruit MQTT Library
+DHT sensor library for ESPx
